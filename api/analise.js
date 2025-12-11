@@ -1,13 +1,8 @@
-import OpenAI from "openai";
-
-// <<< AQUI usamos OPENAI_API_KEY (que já existe na Vercel)
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// api/analise.js
 
 // Helpers de CORS
 function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*"); // depois podemos trocar pelo domínio específico
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
@@ -15,21 +10,13 @@ function setCors(res) {
 export default async function handler(req, res) {
   setCors(res);
 
-  // Preflight (OPTIONS)
+  // Preflight
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
 
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Use o método POST." });
-  }
-
-  // Segurança extra: se a variável não estiver setada, já avisamos
-  if (!process.env.OPENAI_API_KEY) {
-    console.error("OPENAI_API_KEY não está definida nas Environment Variables.");
-    return res.status(500).json({
-      error: "Configuração da API ausente. Verifique OPENAI_API_KEY na Vercel.",
-    });
   }
 
   try {
@@ -41,7 +28,7 @@ export default async function handler(req, res) {
         .json({ error: "Dados insuficientes para análise." });
     }
 
-    // Cálculo dos totais
+    // --- Cálculos básicos ---
     let totalEntradas = 0;
     let totalFixos = 0;
     let totalVariaveis = 0;
@@ -65,54 +52,88 @@ export default async function handler(req, res) {
         const cat = m.categoria || "-";
         const desc = m.descricao || "-";
         const valor = Number(m.valor || 0).toFixed(2).replace(".", ",");
+
         return `${data} | ${tipo} | ${cat} | R$ ${valor} | ${desc}`;
       })
       .join("\n");
 
-    // PROMPT para a IA
+    // --- Prompt para IA ---
     const prompt = `
 Você é um analista financeiro pessoal.
 
-Analise os gastos, metas e sobras do usuário e produza um relatório claro e prático.
+Analise os gastos, metas e sobras do usuário e produza um relatório claro, direto e prático em português.
 
 Dados do mês:
 - Mês: ${mes}
 - Ano: ${ano}
 
-Metas:
-- Poupança: R$ ${metas.metaPoupanca}
-- Variáveis: R$ ${metas.metaVariavel}
-- Cartão: R$ ${metas.metaCartao}
+Metas do mês:
+- Meta de poupança: R$ ${Number(metas.metaPoupanca || 0).toFixed(2)}
+- Meta de gastos variáveis: R$ ${Number(metas.metaVariavel || 0).toFixed(2)}
+- Meta do cartão de crédito: R$ ${Number(metas.metaCartao || 0).toFixed(2)}
 
-Totais:
+Totais calculados:
 - Entradas: R$ ${totalEntradas.toFixed(2)}
-- Gastos Fixos: R$ ${totalFixos.toFixed(2)}
+- Fixos: R$ ${totalFixos.toFixed(2)}
 - Variáveis: R$ ${totalVariaveis.toFixed(2)}
 - Cartão: R$ ${totalCartao.toFixed(2)}
-- Saldo: R$ ${saldoMes.toFixed(2)}
+- Saldo do mês: R$ ${saldoMes.toFixed(2)}
 - Poupança possível: R$ ${poupancaPossivel.toFixed(2)}
 
-Movimentos:
+Lista de movimentos (um por linha):
 ${listaMovimentos}
 
-Monte o relatório com:
-1. Resumo geral.
-2. Pontos positivos.
-3. Alertas e riscos.
-4. Sugestões práticas (5 no máximo).
-5. Se a meta anual de R$ 15.600 é possível.
+Gere um relatório com:
+1) Resumo geral do mês.
+2) Pontos positivos (o que está dentro ou melhor que as metas).
+3) Alertas e riscos (onde está acima das metas ou perigoso).
+4) Sugestões práticas e simples para o próximo mês (máx. 5 bullets).
+5) Se a meta anual de poupança de R$ 15.600,00 parece alcançável no ritmo atual (explique rapidamente).
+Resposta em tom amigável, mas objetivo.
 `;
 
-    // Chamada para a API nova da OpenAI (Responses)
-    const resposta = await client.responses.create({
-      model: "gpt-5.1-mini",
-      input: prompt,
-      max_output_tokens: 500,
+    // --- Chamada para API da OpenAI via fetch (sem SDK) ---
+    const apiKey = process.env.CLIENT_KEY;
+
+    if (!apiKey) {
+      console.error("CLIENT_KEY não configurada no Vercel");
+      return res.status(500).json({ error: "CLIENT_KEY não configurada." });
+    }
+
+    const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini", // ou outro modelo que sua conta permitir
+        messages: [
+          {
+            role: "system",
+            content: "Você é um analista financeiro profissional.",
+          },
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
+        temperature: 0.5,
+      }),
     });
 
+    const data = await openaiRes.json();
+
+    if (!openaiRes.ok) {
+      console.error("Erro da OpenAI:", data);
+      return res
+        .status(500)
+        .json({ error: "Erro ao chamar a OpenAI.", detalhes: data });
+    }
+
     const texto =
-      resposta.output?.[0]?.content?.[0]?.text ||
-      "Não foi possível gerar a análise.";
+      data.choices?.[0]?.message?.content ||
+      "Não foi possível gerar o texto da análise.";
 
     return res.status(200).json({ texto });
   } catch (error) {
